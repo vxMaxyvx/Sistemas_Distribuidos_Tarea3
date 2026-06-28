@@ -1,10 +1,64 @@
-# Tarea 2 — Sistemas Distribuidos 2026-1
-### Análisis de consultas geoespaciales asíncrono con Apache Kafka y Caché
+# Tarea 3 — Sistemas Distribuidos 2026-1
+### Procesamiento Streaming de métricas con Apache Spark y visualización con Elasticsearch + Kibana
 
 **Integrantes:** Vicente Cataldo, Maximiliano Oliva  
-**Stack:** Python 3.12, FastAPI, Apache Kafka (KRaft), Redis 7.4, Docker Compose v2
+**Stack:** Python 3.12, FastAPI, Apache Kafka (KRaft), Redis 7, **Apache Spark 3.5 (Structured Streaming)**, **Elasticsearch 8.13**, **Kibana 8.13**, Docker Compose v2
 
-Esta tarea extiende la arquitectura síncrona de la Tarea 1 incorporando **Apache Kafka** como capa de mensajería asíncrona. Las consultas geoespaciales (Q1-Q5) se desacoplan completamente del procesamiento usando tópicos Kafka, con reintentos automáticos y Dead Letter Queue (DLQ) para el manejo de fallos.
+Esta tarea extiende la arquitectura de la **Tarea 2** (consultas geoespaciales Q1-Q5 desacopladas con Apache Kafka, reintentos y Dead Letter Queue) incorporando un **pipeline de observabilidad en tiempo real**:
+
+1. El **Sistema de Métricas** publica cada evento procesado en un tópico Kafka dedicado: **`metrics-topic`**.
+2. Un job de **Apache Spark Structured Streaming** consume ese tópico, agrega los datos en **ventanas de tiempo deslizantes** (throughput, latencia p50/p95, hit rate, retry rate) y escribe los resultados en **Elasticsearch**.
+3. **Kibana** consume Elasticsearch y muestra **dashboards interactivos** que se actualizan automáticamente.
+
+De esta forma el plano de **procesamiento de consultas** (Tarea 2) queda separado del plano de **observabilidad** (Tarea 3).
+
+```
+Generador Tráfico ──> Kafka(queries) ──> cache_api ──> Redis / Generador Respuestas
+                                            │
+                                            ▼ (HTTP /event)
+                                        Métricas ──> Kafka(metrics-topic)
+                                                          │
+                                                          ▼
+                                        Spark Structured Streaming
+                                                          │ (ventanas de tiempo)
+                                                          ▼
+                                              Elasticsearch ──> Kibana (dashboards)
+```
+
+---
+
+## Inicio rápido (Tarea 3)
+
+```bash
+# 1. Generar dataset (si aún no existe)
+pip install numpy
+python3 scripts/download_data.py
+
+# 2. Levantar TODO el stack (servicios Tarea 2 + Spark + Elasticsearch + Kibana)
+export USE_KAFKA=true
+docker compose up -d --build
+
+# 3. Configurar Elasticsearch + Kibana (index template, data view e import del dashboard)
+bash kibana/setup.sh
+
+# 4. Generar tráfico para alimentar el pipeline de métricas
+curl -s -X POST http://localhost:5003/run \
+  -H "Content-Type: application/json" \
+  -d '{"distribution":"zipf","rate_qps":100,"duration_sec":300,"zipf_s":1.2,"concurrency":33,"seed":42,"label":"demo"}'
+
+# 5. Abrir el dashboard
+#    http://localhost:5601/app/dashboards#/view/t3-dashboard
+```
+
+> La primera vez tarda varios minutos: Kafka arranca, Spark descarga/usa los conectores (Kafka + Elasticsearch) y Elasticsearch/Kibana inicializan. Verificá con `docker compose logs -f spark`.
+
+### Puertos del stack de observabilidad
+
+| Servicio | Puerto (host) | URL |
+|---|---|---|
+| Elasticsearch | 9200 | http://localhost:9200 |
+| Kibana | 5601 | http://localhost:5601 |
+| Spark (driver) | — (interno) | `docker compose logs -f spark` |
 
 ---
 
@@ -32,18 +86,51 @@ pip install numpy matplotlib
 
 ## Arquitectura
 
-El sistema tiene 4 servicios propios más Redis y Kafka como infraestructura:
+El sistema tiene los servicios de la Tarea 2 más el nuevo pipeline de observabilidad de la Tarea 3:
 
 | Servicio | Puerto (host) | Rol |
 |---|---|---|
 | `generador_trafico` | 5003 | Productor Kafka o cliente HTTP según `USE_KAFKA` |
 | `cache_api` | — (interno) | Consumidor Kafka, caché con Redis, escala horizontal |
 | `generador_respuestas` | 5001 | Resuelve consultas Q1-Q5, expone `/toggle_failure` |
-| `metricas` | 5002 | Registra eventos, calcula percentiles, obtiene lag Kafka |
-| `redis` | 6380 | Caché en memoria con políticas LRU/LFU/FIFO |
-| `kafka` | 9092 | Broker con tópicos `queries`, `retry-queries`, `dlq-queries` |
+| `metricas` | 5002 | Registra eventos y **publica cada evento en `metrics-topic`** |
+| `redis` | 6379 | Caché en memoria con políticas LRU/LFU/FIFO |
+| `kafka` | 9092 | Broker: `queries`, `retry-queries`, `dlq-queries`, **`metrics-topic`** |
+| **`spark`** | — (interno) | **Job Structured Streaming: ventanas de tiempo → Elasticsearch** |
+| **`elasticsearch`** | 9200 | **Almacén de las métricas agregadas por Spark** |
+| **`kibana`** | 5601 | **Dashboards interactivos de las métricas** |
 
-El flujo en modo Kafka: `generador_trafico` publica en `queries` → `cache_api` consume, verifica Redis, si hay miss llama a `generador_respuestas` → si falla, reintenta vía `retry-queries` hasta `MAX_RETRIES`, luego envía a `dlq-queries`.
+**Plano de procesamiento (Tarea 2):** `generador_trafico` publica en `queries` → `cache_api` consume, verifica Redis, si hay miss llama a `generador_respuestas` → si falla, reintenta vía `retry-queries` hasta `MAX_RETRIES`, luego envía a `dlq-queries`.
+
+**Plano de observabilidad (Tarea 3):** `cache_api` reporta cada evento a `metricas` (HTTP) → `metricas` publica el evento normalizado en `metrics-topic` → `spark` agrega por ventanas y escribe en `elasticsearch` → `kibana` visualiza.
+
+### Esquema del evento publicado en `metrics-topic`
+
+```json
+{
+  "ts": 1750000000.123,
+  "timestamp": "2026-06-21T18:00:00.123000+00:00",
+  "event_type": "hit | miss | recovery | retry | dlq | error",
+  "query_type": "Q1",
+  "latency_ms": 42.7,
+  "cache_hit": true,
+  "was_retried": false,
+  "is_retry_event": false,
+  "retry_count": 0,
+  "status": "success | pending | failed",
+  "key": "count:Z1:conf=0.50"
+}
+```
+
+### Agregaciones que calcula Spark (por ventana deslizante de 1 min, slide 10 s)
+
+| Campo en Elasticsearch | Cálculo |
+|---|---|
+| `throughput_per_min` | consultas exitosas por minuto |
+| `latency_p50`, `latency_p95`, `latency_p99` | `percentile_approx` de la latencia de consultas exitosas |
+| `hit_rate` | `count_hit / count_success` |
+| `retry_rate` | `count_retry / (count_success + count_dlq)` |
+| `dlq_rate` | `count_dlq / (count_success + count_dlq)` |
 
 ---
 
@@ -67,10 +154,17 @@ El flujo en modo Kafka: `generador_trafico` publica en `queries` → `cache_api`
 │   │   ├── main.py                  # /run, /stop, /status, /health
 │   │   └── distributions.py         # Zipf, Uniforme, Poisson
 │   └── Dockerfile
-├── metricas/                        # Servicio 4 — Métricas
+├── metricas/                        # Servicio 4 — Métricas + publisher metrics-topic
 │   ├── app/
-│   │   └── main.py                  # /event, /summary, /snapshot, /reset
+│   │   └── main.py                  # /event (publica en Kafka), /summary, /snapshot
 │   └── Dockerfile
+├── spark_streaming/                 # Tarea 3 — Job Spark Structured Streaming
+│   ├── job.py                       # Lee metrics-topic, ventanas de tiempo → Elasticsearch
+│   ├── entrypoint.sh                # spark-submit con conectores Kafka + ES
+│   └── Dockerfile                   # Imagen basada en bitnami/spark:3.5.1
+├── kibana/                          # Tarea 3 — Dashboards
+│   ├── dashboard.ndjson             # Visualizaciones + dashboard (importable)
+│   └── setup.sh                     # Crea index template, data view e importa dashboard
 ├── experiments/
 │   ├── run_kafka_experiments.py     # Corre los 8 escenarios en secuencia automática
 │   └── build_kafka_figures.py       # Genera los 8 gráficos del informe
@@ -78,8 +172,9 @@ El flujo en modo Kafka: `generador_trafico` publica en `queries` → `cache_api`
 │   └── download_data.py             # Genera el dataset sintético de edificaciones
 ├── data/
 │   └── buildings_rm.csv             # Dataset de la Región Metropolitana
+├── informe/
+│   └── informe_tarea3.md            # Informe de análisis y discusión (Tarea 3)
 ├── docker-compose.yml
-├── .env                             # Variables de configuración
 └── README.md
 ```
 
@@ -518,7 +613,53 @@ RETRY_DELAY_SEC=0.1   # tiempo entre reintentos
 # --- Latencia simulada del Generador de Respuestas (ms) ---
 SIM_LATENCY_MIN_MS=30
 SIM_LATENCY_MAX_MS=120
+
+# --- Tarea 3: pipeline de observabilidad ---
+PUBLISH_METRICS_KAFKA=true       # métricas publican cada evento en metrics-topic
+METRICS_TOPIC=metrics-topic
+ES_INDEX=metrics-aggregated      # índice de Elasticsearch donde escribe Spark
+WINDOW_DURATION=1 minute         # tamaño de la ventana de agregación
+SLIDE_DURATION=10 seconds        # frecuencia de actualización (sliding window)
+WATERMARK=30 seconds             # tolerancia a datos tardíos
 ```
+
+---
+
+## Pipeline de observabilidad y escenarios (Tarea 3)
+
+Una vez levantado el stack (`docker compose up -d --build` con `USE_KAFKA=true`) y ejecutado `bash kibana/setup.sh`, el dashboard **"Tarea 3 - Monitoreo en Tiempo Real"** muestra cómo se reflejan los escenarios de la Tarea 2:
+
+| Escenario | Qué observar en los dashboards |
+|---|---|
+| **Operación normal** | `throughput_per_min` estable, `hit_rate` creciente al calentarse la caché, `latency_p95` baja |
+| **Múltiples consumidores** | Mayor `throughput_per_min` y caída de `latency_p95` al escalar `cache_api` |
+| **Falla temporal** | Caída del throughput, subida de `retry_rate` y aparición de `dlq_rate` durante la caída |
+| **Reintentos / DLQ** | `retry_rate` > 0 mientras el `generador_respuestas` está caído; `dlq_rate` > 0 si se agotan los reintentos |
+| **Spike de tráfico** | Pico abrupto en `throughput_per_min` y en `latency_p95`, normalización posterior |
+
+Para reproducir un escenario específico podés usar los mismos comandos de la sección de experimentos de la Tarea 2; el pipeline de métricas se alimenta automáticamente porque `metricas` publica en `metrics-topic` independientemente del modo. Recordá hacer **zoom temporal a "Last 15 minutes"** en Kibana y activar el **auto-refresh (10 s)**.
+
+### Verificar el pipeline manualmente
+
+```bash
+# ¿Llegan eventos al tópico de métricas?
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic metrics-topic --max-messages 3
+
+# ¿Spark está escribiendo en Elasticsearch?
+curl -s "http://localhost:9200/metrics-aggregated/_count"
+curl -s "http://localhost:9200/metrics-aggregated/_search?size=1&sort=window_end:desc" | python3 -m json.tool
+
+# Logs del job de Spark
+docker compose logs -f spark
+```
+
+### Troubleshooting
+
+- **El dashboard sale vacío:** asegurate de haber generado tráfico y de que Spark ya emitió al menos una ventana (puede tardar hasta `WATERMARK + SLIDE`). Verificá `curl -s http://localhost:9200/metrics-aggregated/_count`.
+- **`No time field`/data view sin datos:** corré `bash kibana/setup.sh` de nuevo; crea el index template (campos de fecha) y el data view con `window_end`.
+- **Spark no arranca:** la primera vez descarga los conectores de Kafka y Elasticsearch (necesita red). Revisá `docker compose logs spark`.
+- **Elasticsearch no levanta (`vm.max_map_count`):** en Linux ejecutá `sudo sysctl -w vm.max_map_count=262144`.
 
 ---
 
@@ -534,6 +675,12 @@ SIM_LATENCY_MAX_MS=120
 - `POST /toggle_failure` — `{"enabled": true|false}` para simular caída del servicio
 
 ### Métricas (`localhost:5002`)
+- `POST /event` — recibe un evento; lo acumula en memoria **y lo publica en `metrics-topic`**
 - `GET /summary` — resumen completo: latencias p50/p95, throughput, hit rate, lag Kafka
 - `POST /snapshot` — guarda el estado actual con un label
 - `POST /reset` — limpia todos los acumuladores de estadísticas
+
+### Elasticsearch (`localhost:9200`) y Kibana (`localhost:5601`)
+- `GET /metrics-aggregated/_count` — número de ventanas agregadas escritas por Spark
+- `GET /metrics-aggregated/_search` — documentos de métricas agregadas
+- Kibana → **Dashboards → "Tarea 3 - Monitoreo en Tiempo Real"** (`/app/dashboards#/view/t3-dashboard`)

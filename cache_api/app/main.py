@@ -105,6 +105,7 @@ def _process_single_message(query, topic, sync_http, producer):
                 "key": key,
                 "latency_ms": latency_ms,
                 "lookup_ms": t_lookup_ms,
+                "retry_count": retry_count,
                 "ts": time.time(),
             }, timeout=2.0)
         except Exception:
@@ -139,6 +140,7 @@ def _process_single_message(query, topic, sync_http, producer):
                 "lookup_ms": t_lookup_ms,
                 "compute_ms": compute_ms,
                 "ttl": ttl,
+                "retry_count": retry_count,
                 "ts": time.time(),
             }, timeout=2.0)
         except Exception:
@@ -165,6 +167,7 @@ def _process_single_message(query, topic, sync_http, producer):
                     "query_type": query_type.upper(),
                     "key": key,
                     "error": str(e),
+                    "retry_count": retry_count,
                     "ts": time.time(),
                 }, timeout=2.0)
             except Exception:
@@ -185,6 +188,7 @@ def _process_single_message(query, topic, sync_http, producer):
                     "query_type": query_type.upper(),
                     "key": key,
                     "error": str(e),
+                    "retry_count": retry_count,
                     "ts": time.time(),
                 }, timeout=2.0)
             except Exception:

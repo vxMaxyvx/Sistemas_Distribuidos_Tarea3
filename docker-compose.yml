@@ -1,7 +1,7 @@
 services:
   redis:
     image: redis:7-alpine
-    container_name: tarea2_redis
+    container_name: tarea3_redis
     command: >
       redis-server
       --maxmemory ${REDIS_MAXMEMORY:-200mb}
@@ -19,7 +19,7 @@ services:
 
   kafka:
     image: apache/kafka:3.7.0
-    container_name: tarea2_kafka
+    container_name: tarea3_kafka
     ports:
       - "9092:9092"
     environment:
@@ -43,7 +43,7 @@ services:
 
   generador_respuestas:
     build: ./generador_respuestas
-    container_name: tarea2_gen_respuestas
+    container_name: tarea3_gen_respuestas
     environment:
       DATA_PATH: /app/data/buildings_rm.csv
       SIM_LATENCY_MIN_MS: ${SIM_LATENCY_MIN_MS:-30}
@@ -97,13 +97,17 @@ services:
 
   metricas:
     build: ./metricas
-    container_name: tarea2_metricas
+    container_name: tarea3_metricas
     environment:
       LATENCY_WINDOW: 5000
       SNAPSHOT_DIR: /snapshots
       CACHE_STATS_URL: http://cache_api:5000/stats
       USE_KAFKA: ${USE_KAFKA:-false}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # Tarea 3: publicacion de eventos hacia el topico dedicado de metricas.
+      PUBLISH_METRICS_KAFKA: ${PUBLISH_METRICS_KAFKA:-true}
+      METRICS_TOPIC: ${METRICS_TOPIC:-metrics-topic}
+      METRICS_TOPIC_PARTITIONS: ${METRICS_TOPIC_PARTITIONS:-3}
     volumes:
       - ./snapshots:/snapshots
     ports:
@@ -116,7 +120,7 @@ services:
 
   generador_trafico:
     build: ./generador_trafico
-    container_name: tarea2_trafico
+    container_name: tarea3_trafico
     environment:
       CACHE_URL: http://cache_api:5000
       USE_KAFKA: ${USE_KAFKA:-false}
@@ -130,3 +134,73 @@ services:
         condition: service_started
       kafka:
         condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Tarea 3: pipeline de observabilidad (Spark -> Elasticsearch -> Kibana)
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: tarea3_elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.security.http.ssl.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(yellow|green)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 40s
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.4
+    container_name: tarea3_kibana
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_SECURITY_ENABLED: "false"
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q '\"level\":\"available\"' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  spark:
+    build: ./spark_streaming
+    container_name: tarea3_spark
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      METRICS_TOPIC: ${METRICS_TOPIC:-metrics-topic}
+      ES_NODES: elasticsearch
+      ES_PORT: 9200
+      ES_INDEX: ${ES_INDEX:-metrics-aggregated}
+      WINDOW_DURATION: ${WINDOW_DURATION:-1 minute}
+      SLIDE_DURATION: ${SLIDE_DURATION:-10 seconds}
+      WATERMARK: ${WATERMARK:-30 seconds}
+      TRIGGER_INTERVAL: ${TRIGGER_INTERVAL:-10 seconds}
+      STARTING_OFFSETS: ${STARTING_OFFSETS:-latest}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      metricas:
+        condition: service_started
+
+volumes:
+  es_data:

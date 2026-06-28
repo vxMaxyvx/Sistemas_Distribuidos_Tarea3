@@ -11,6 +11,7 @@ import logging
 import threading
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,141 @@ CACHE_STATS_URL = os.getenv("CACHE_STATS_URL",
 
 USE_KAFKA = os.getenv("USE_KAFKA", "false").lower() == "true"
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+
+# --- Tarea 3: publicacion de eventos de metricas en un topico dedicado ---
+# Cada evento procesado por el sistema se publica como un mensaje estructurado
+# en `metrics-topic`, desde donde Apache Spark Structured Streaming lo consume
+# para calcular agregaciones por ventanas de tiempo y escribirlas en Elasticsearch.
+PUBLISH_METRICS_KAFKA = os.getenv("PUBLISH_METRICS_KAFKA", "true").lower() == "true"
+METRICS_TOPIC = os.getenv("METRICS_TOPIC", "metrics-topic")
+METRICS_TOPIC_PARTITIONS = int(os.getenv("METRICS_TOPIC_PARTITIONS", "3"))
+
+
+class MetricsPublisher:
+    """Publica cada evento de metrica en `metrics-topic` (plano de observabilidad).
+
+    Se mantiene desacoplado del plano de procesamiento: si Kafka no esta
+    disponible, los errores se registran pero nunca interrumpen el flujo
+    principal de consultas (fire-and-forget).
+    """
+
+    def __init__(self):
+        self.producer = None
+        self.enabled = PUBLISH_METRICS_KAFKA
+        self._lock = threading.Lock()
+
+    def start(self):
+        if not self.enabled:
+            log.info("Publicacion de metricas en Kafka deshabilitada")
+            return
+        thread = threading.Thread(target=self._connect, daemon=True)
+        thread.start()
+
+    def _connect(self):
+        from kafka import KafkaProducer
+        from kafka.admin import KafkaAdminClient, NewTopic
+
+        # Crear el topico dedicado de metricas si no existe.
+        for attempt in range(20):
+            try:
+                admin = KafkaAdminClient(
+                    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                    client_id="metricas-admin",
+                )
+                existing = admin.list_topics()
+                if METRICS_TOPIC not in existing:
+                    admin.create_topics([NewTopic(
+                        name=METRICS_TOPIC,
+                        num_partitions=METRICS_TOPIC_PARTITIONS,
+                        replication_factor=1,
+                    )])
+                    log.info(f"Topico de metricas creado: {METRICS_TOPIC}")
+                admin.close()
+                break
+            except Exception as e:
+                log.warning(f"Esperando Kafka para crear {METRICS_TOPIC} "
+                            f"(intento {attempt + 1}/20): {e}")
+                time.sleep(2.0)
+
+        # Crear el productor.
+        for attempt in range(20):
+            try:
+                producer = KafkaProducer(
+                    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+                    linger_ms=50,
+                    acks=1,
+                )
+                with self._lock:
+                    self.producer = producer
+                log.info(f"Publicador de metricas Kafka listo -> {METRICS_TOPIC}")
+                return
+            except Exception as e:
+                log.warning(f"Esperando Kafka para el productor de metricas "
+                            f"(intento {attempt + 1}/20): {e}")
+                time.sleep(2.0)
+        log.error("No se pudo inicializar el publicador de metricas en Kafka")
+
+    def publish(self, event: dict):
+        """Construye el evento estructurado y lo envia a metrics-topic."""
+        if not self.enabled or self.producer is None:
+            return
+        try:
+            self.producer.send(METRICS_TOPIC, value=_to_metric_event(event))
+        except Exception as e:
+            log.debug(f"No se pudo publicar metrica en Kafka: {e}")
+
+    def close(self):
+        if self.producer is not None:
+            try:
+                self.producer.flush(timeout=5)
+                self.producer.close()
+            except Exception:
+                pass
+
+
+def _to_metric_event(ev: dict) -> dict:
+    """Normaliza un evento interno al esquema publicado en metrics-topic.
+
+    Campos exigidos por el enunciado: timestamp, tipo de consulta, latencia
+    individual, resultado de la busqueda en cache, cantidad de reintentos y
+    estado final de la consulta.
+    """
+    etype = ev.get("event")
+    if etype in ("hit", "miss", "recovery"):
+        status = "success"
+    elif etype in ("dlq", "error"):
+        status = "failed"
+    else:  # retry
+        status = "pending"
+
+    if etype == "hit":
+        cache_hit = True
+    elif etype in ("miss", "recovery"):
+        cache_hit = False
+    else:
+        cache_hit = None
+
+    ts = float(ev.get("ts") or time.time())
+    iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+    return {
+        "ts": ts,
+        "timestamp": iso,
+        "event_type": etype,
+        "query_type": (ev.get("query_type") or "UNK").upper(),
+        "latency_ms": ev.get("latency_ms"),
+        "cache_hit": cache_hit,
+        # `recovery` es una consulta que se resolvio despues de >=1 reintento.
+        "was_retried": etype == "recovery",
+        "is_retry_event": etype == "retry",
+        "retry_count": ev.get("retry_count") if ev.get("retry_count") is not None else (1 if etype == "retry" else (0 if etype != "dlq" else None)),
+        "status": status,
+        "key": ev.get("key"),
+    }
+
+
+publisher = MetricsPublisher()
 
 
 def get_kafka_backlog() -> int:
@@ -302,8 +438,10 @@ async def lifespan(app: FastAPI):
     global http
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     http = httpx.AsyncClient(timeout=5.0)
+    publisher.start()
     log.info("Servicio de Metricas listo")
     yield
+    publisher.close()
     await http.aclose()
 
 
@@ -319,6 +457,7 @@ class Event(BaseModel):
     compute_ms: float | None = None
     ttl: int | None = None
     error: str | None = None
+    retry_count: int | None = None
     ts: float | None = None
 
 
@@ -329,7 +468,11 @@ async def health():
 
 @app.post("/event")
 async def event(ev: Event):
-    metrics.record(ev.dict())
+    data = ev.dict()
+    # Plano de procesamiento: acumulado en memoria (Tarea 1 y 2).
+    metrics.record(data)
+    # Plano de observabilidad (Tarea 3): publicar en metrics-topic para Spark.
+    publisher.publish(data)
     return {"ok": True}
 
 
