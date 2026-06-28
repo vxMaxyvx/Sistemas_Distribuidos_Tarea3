@@ -14,7 +14,7 @@ Todo corre en Docker Compose. No hay que instalar nada mas que Docker.
 
 ---
 
-## Que necesitas
+## Requisitos
 
 - Docker Engine v24+ y Docker Compose v2
 - Python 3.10+ con numpy (solo para generar el dataset una vez)
