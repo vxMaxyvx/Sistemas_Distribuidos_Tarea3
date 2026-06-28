@@ -33,22 +33,14 @@ CACHE_STATS_URL = os.getenv("CACHE_STATS_URL",
 USE_KAFKA = os.getenv("USE_KAFKA", "false").lower() == "true"
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 
-# --- Tarea 3: publicacion de eventos de metricas en un topico dedicado ---
-# Cada evento procesado por el sistema se publica como un mensaje estructurado
-# en `metrics-topic`, desde donde Apache Spark Structured Streaming lo consume
-# para calcular agregaciones por ventanas de tiempo y escribirlas en Elasticsearch.
+# Tarea 3: publicar eventos en metrics-topic para que Spark los procese.
 PUBLISH_METRICS_KAFKA = os.getenv("PUBLISH_METRICS_KAFKA", "true").lower() == "true"
 METRICS_TOPIC = os.getenv("METRICS_TOPIC", "metrics-topic")
 METRICS_TOPIC_PARTITIONS = int(os.getenv("METRICS_TOPIC_PARTITIONS", "3"))
 
 
 class MetricsPublisher:
-    """Publica cada evento de metrica en `metrics-topic` (plano de observabilidad).
-
-    Se mantiene desacoplado del plano de procesamiento: si Kafka no esta
-    disponible, los errores se registran pero nunca interrumpen el flujo
-    principal de consultas (fire-and-forget).
-    """
+    """Publica eventos en metrics-topic. Si Kafka no esta, no se cae el sistema."""
 
     def __init__(self):
         self.producer = None
@@ -126,12 +118,7 @@ class MetricsPublisher:
 
 
 def _to_metric_event(ev: dict) -> dict:
-    """Normaliza un evento interno al esquema publicado en metrics-topic.
-
-    Campos exigidos por el enunciado: timestamp, tipo de consulta, latencia
-    individual, resultado de la busqueda en cache, cantidad de reintentos y
-    estado final de la consulta.
-    """
+    """Normaliza un evento al esquema que espera Spark."""
     etype = ev.get("event")
     if etype in ("hit", "miss", "recovery"):
         status = "success"

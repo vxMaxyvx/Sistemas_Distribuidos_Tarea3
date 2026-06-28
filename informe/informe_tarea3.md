@@ -8,31 +8,22 @@
 
 ## 1. Introducción
 
-La Tarea 1 implementó una plataforma de análisis de consultas geoespaciales sobre el dataset
-*Google Open Buildings*, con una caché (Redis) para optimizar consultas repetidas. La Tarea 2
-evolucionó la arquitectura incorporando **Apache Kafka** como sistema de colas de mensajes, con
-mecanismos de **reintento** y **Dead Letter Queue (DLQ)** para evitar la pérdida de consultas
-durante fallas temporales.
+En la Tarea 1 hicimos un sistema de consultas geoespaciales con cache en Redis. En la Tarea 2
+agregamos Kafka con reintentos y DLQ para no perder consultas cuando falla el generador de
+respuestas. Pero las metricas seguian en memoria o en logs, sin forma de verlas en tiempo real.
 
-El problema que aborda esta tercera entrega es que, hasta la Tarea 2, **todas las métricas del
-sistema (throughput, latencias, hit rate, reintentos) sólo existían en memoria o en logs**, lo que
-imposibilita el monitoreo en tiempo real. La Tarea 3 incorpora un **pipeline de observabilidad**
-desacoplado del plano de procesamiento, compuesto por:
+La Tarea 3 agrega un pipeline de metricas que corre en paralelo al sistema de consultas:
 
-- **Publicación de métricas** desde el Sistema de Métricas hacia un tópico Kafka dedicado
-  (`metrics-topic`).
-- **Apache Spark Structured Streaming**, que consume el tópico, calcula agregaciones por
-  **ventanas de tiempo** y escribe los resultados en **Elasticsearch**.
-- **Kibana**, que visualiza esas agregaciones en **dashboards interactivos** que se actualizan
-  automáticamente.
+- El servicio de Metricas publica cada evento en el topico `metrics-topic`.
+- Spark lee ese topico, calcula agregaciones en ventanas de tiempo y las guarda en Elasticsearch.
+- Kibana muestra dashboards con esas metricas actualizandose automaticamente.
 
 ---
 
 ## 2. Descripción de la Arquitectura
 
-La arquitectura mantiene intacto el plano de procesamiento de la Tarea 2 y agrega, en paralelo, un
-plano de observabilidad. Ambos planos se comunican únicamente a través de Kafka, lo que garantiza
-el desacoplamiento.
+La arquitectura de la Tarea 2 sigue igual. El pipeline de metricas corre en paralelo y se
+comunica con el resto solo a traves de Kafka.
 
 ```
             PLANO DE PROCESAMIENTO (Tarea 2)                  PLANO DE OBSERVABILIDAD (Tarea 3)
@@ -208,24 +199,19 @@ el tiempo de recuperación.
 ## 5. Justificación de la Arquitectura de Monitoreo
 
 ### 5.1 ¿Por qué Apache Spark Structured Streaming?
-- **Procesamiento continuo mediante ventanas temporales:** Structured Streaming ofrece de forma
-  nativa ventanas (tumbling/sliding), manejo de *event-time* y *watermarking* para datos tardíos,
-  lo que evita reimplementar lógica compleja de agregación temporal.
-- **Escalabilidad:** el mismo job corre en `local[*]` o en un clúster sin cambios de código.
-- **Tolerancia a fallos:** el *checkpointing* permite reanudar el procesamiento sin perder estado.
+- Ya trae ventanas de tiempo (sliding/tumbling) y watermarking para datos que llegan tarde.
+  No hay que programar esa logica a mano.
+- El mismo job corre en local o en cluster sin cambiar codigo.
+- Tiene checkpointing, asi que si se reinicia no pierde el estado.
 
 ### 5.2 ¿Por qué Elasticsearch + Kibana?
-- Elasticsearch está optimizado para **datos time-series** y consultas de agregación de baja
-  latencia; Kibana se integra de forma nativa y permite construir dashboards interactivos con
-  auto-refresh sin desarrollar un frontend propio.
-- El conector `elasticsearch-spark` integra ambos mundos con un esfuerzo mínimo.
+- Elasticsearch anda bien con datos de tiempo y Kibana permite armar dashboards
+  sin programar un frontend propio.
+- El conector `elasticsearch-spark` une Spark con Elasticsearch sin mucho trabajo.
 
 ### 5.3 Separación entre plano de procesamiento y plano de observabilidad
-El uso de un **tópico Kafka dedicado** (`metrics-topic`) desacopla por completo la observabilidad
-del procesamiento: si Spark, Elasticsearch o Kibana fallan, el sistema de consultas sigue
-funcionando (las métricas simplemente no se visualizan). Este desacoplamiento es una buena práctica
-fundamental en arquitecturas distribuidas, pues evita que el monitoreo se convierta en un punto
-único de falla del servicio principal.
+Usar un topico dedicado para metricas separa el monitoreo del procesamiento.
+Si Spark, Elasticsearch o Kibana se caen, las consultas siguen funcionando igual.
 
 ### 5.4 Ventajas de un pipeline desacoplado
 - Cada componente escala y evoluciona de forma independiente.
@@ -249,10 +235,8 @@ fundamental en arquitecturas distribuidas, pues evita que el monitoreo se convie
 ## 6. Discusión: Monitoreo en Tiempo Real vs. Análisis Posterior
 
 ### 6.1 Beneficios del monitoreo en línea para la detección de fallos
-Frente a depender únicamente de logs o métricas locales, el monitoreo en línea permite **detectar y
-caracterizar incidentes mientras ocurren**. La firma *throughput↓ + retry_rate↑* aparece en
-segundos en el dashboard, mientras que con logs habría que recolectarlos y procesarlos *a
-posteriori*, retrasando la respuesta.
+Usar solo logs es lento: hay que juntarlos y procesarlos despues. Con el dashboard
+en linea ves la falla en segundos (throughput baja, retry rate sube) y reaccionas al tiro.
 
 ### 6.2 Problemas identificables rápidamente mediante dashboards
 - Caídas de servicio (throughput a cero, retry/DLQ al alza).
@@ -275,10 +259,8 @@ posteriori*, retrasando la respuesta.
 
 ## 7. Conclusión
 
-La Tarea 3 transforma un sistema que sólo registraba métricas en logs en una plataforma con
-**observabilidad en tiempo real**. El pipeline `metrics-topic → Spark → Elasticsearch → Kibana`
-permite no sólo visualizar el comportamiento del sistema, sino también **detectar y caracterizar**
-los escenarios de la Tarea 2 (operación normal, escalamiento, fallas, reintentos/DLQ y spikes)
-directamente desde los dashboards. El diseño desacoplado mediante un tópico dedicado garantiza que
-la capa de monitoreo no comprometa la disponibilidad del servicio principal, una propiedad esencial
-en sistemas distribuidos.
+En esta tarea agregamos un pipeline de metricas en tiempo real usando Kafka, Spark,
+Elasticsearch y Kibana. Ahora podemos ver como se comporta el sistema mientras corre,
+identificar fallas, reintentos y spikes de trafico directamente desde los dashboards.
+El diseno desacoplado con un topico dedicado hace que el monitoreo no afecte al servicio
+principal.

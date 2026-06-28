@@ -285,11 +285,8 @@ def run_kafka_consumer():
 
     sync_http = httpx.Client(timeout=10.0)
     executor = ThreadPoolExecutor(max_workers=CONSUMER_CONCURRENCY)
-    # Semaforo de back-pressure: limita tareas en vuelo sin bloquear el poll.
-    # Esto es CRITICO: si esperamos fut.result() antes del proximo poll,
-    # los threads durmiendo (RETRY_DELAY_SEC) paralizan el consumer y acumulan
-    # un backlog tan grande que retry_count=3 se procesa DESPUES de la recuperacion
-    # -> DLQ=0. Con semaforo no-bloqueante, los reintentos ciclan rapidamente.
+    # Semaforo para limitar tareas en vuelo sin bloquear el poll.
+    # Sin esto, los reintentos duermen y el consumer se paraliza.
     sem = threading.Semaphore(CONSUMER_CONCURRENCY * 4)
 
     def _guarded_process(query, topic):

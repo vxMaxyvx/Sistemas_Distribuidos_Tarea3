@@ -1,22 +1,8 @@
 """
-Tarea 3 - Procesamiento Streaming de metricas con Apache Spark.
+Job de Spark Structured Streaming para la Tarea 3.
 
-Job de PySpark (Structured Streaming) que se ejecuta de forma continua y:
-  1. Lee el stream de eventos de metricas desde el topico Kafka `metrics-topic`.
-  2. Parsea los mensajes JSON publicados por el Sistema de Metricas (Tarea 2/3).
-  3. Aplica ventanas de tiempo deslizantes con actualizacion (sliding windows).
-  4. Calcula, dentro de cada ventana:
-        - throughput  : consultas exitosas por minuto.
-        - latency p50 : mediana de la latencia de consultas exitosas.
-        - latency p95 : percentil 95 de la latencia de consultas exitosas.
-        - hit_rate    : proporcion de cache hits.
-        - retry_rate  : proporcion de consultas que necesitaron reintentos.
-        - dlq_rate    : proporcion de consultas derivadas a la DLQ.
-  5. Escribe los resultados agregados en Elasticsearch para su visualizacion
-     en Kibana.
-
-El plano de observabilidad (este job) esta completamente desacoplado del plano
-de procesamiento de consultas de la Tarea 2.
+Lee eventos de metrics-topic, los agrega en ventanas de tiempo y los escribe
+en Elasticsearch. Corre continuamente y esta desacoplado del resto del sistema.
 """
 import os
 

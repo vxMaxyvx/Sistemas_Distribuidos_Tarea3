@@ -135,9 +135,7 @@ services:
       kafka:
         condition: service_healthy
 
-  # ---------------------------------------------------------------------------
-  # Tarea 3: pipeline de observabilidad (Spark -> Elasticsearch -> Kibana)
-  # ---------------------------------------------------------------------------
+  # Tarea 3: Spark, Elasticsearch y Kibana
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
     container_name: tarea3_elasticsearch
