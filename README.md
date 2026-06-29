@@ -182,34 +182,6 @@ Lanza trafico normal, despues un pico de 4x la tasa, y despues de nuevo normal. 
 
 ---
 
-## Que hay que mostrar en el video de demostracion (~15 minutos)
-
-El PDF pide un video de aproximadamente 15 minutos que muestre:
-
-1. **El pipeline funcionando:** mostra que los contenedores estan arriba, que hay trafico generandose, y que el dashboard de Kibana se actualiza en tiempo real.
-
-2. **Los dashboards:** explica brevemente que muestra cada panel:
-   - Throughput (consultas exitosas por minuto)
-   - Latencia p50 / p95 (mediana y percentil 95)
-   - Hit rate (porcentaje de aciertos de cache)
-   - Retry rate / DLQ rate (reintentos y consultas perdidas)
-
-3. **Los 5 escenarios:**
-   - **Operacion normal:** throughput estable, hit rate subiendo, latencia baja.
-   - **Multiples consumidores:** compara 1 vs 3 consumidores, mostra que mejora throughput y latencia.
-   - **Falla temporal:** mostra como se ve la caida en los dashboards (throughput baja, retry rate sube, dlq aparece). Explica que con Kafka las consultas se recuperan, sin Kafka se pierden.
-   - **Reintentos y DLQ:** mostra que el retry rate indica que el sistema esta reintentando, y que si falla mucho van a la DLQ.
-   - **Spike de trafico:** mostra el pico abrupto en throughput y latencia, y como se estabiliza.
-
-4. **Analisis:** responde las preguntas del PDF:
-   - Se puede identificar una falla solo mirando los dashboards? Si, por la firma throughput bajo + retry rate alto.
-   - Como se ve un spike de carga? Pico en throughput y latencia.
-   - Que indicadores muestran reintentos? Retry rate.
-   - Por que Spark + Elasticsearch + Kibana? Porque permite procesar metricas en ventanas de tiempo y visualizarlas sin escribir un frontend propio.
-   - Que ventajas tiene monitorear en tiempo real vs. mirar logs despues? Se detectan problemas mientras ocurren, no despues.
-
----
-
 ## Verificar que todo funciona
 
 Si queres chequear que el pipeline esta andando:
